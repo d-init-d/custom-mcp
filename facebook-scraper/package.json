@@ -1,0 +1,42 @@
+{
+  "name": "facebook-scraper-mcp",
+  "version": "1.0.0",
+  "description": "Hybrid MCP Server for Facebook scraping - Auto-detects and uses available MCPs",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "playwright": "^1.40.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "cheerio": "^1.0.0-rc.12",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2",
+    "rimraf": "^5.0.5"
+  },
+  "keywords": [
+    "mcp",
+    "facebook",
+    "scraper",
+    "hybrid",
+    "playwright",
+    "brightdata",
+    "firecrawl"
+  ],
+  "author": "d-init-d",
+  "license": "MIT"
+}
