@@ -1,14 +1,18 @@
 /**
  * Standalone Adapter
  * Uses built-in Playwright library - always available as fallback
+ * Enhanced with retry, rate limiting, and caching
  */
 
-import { chromium, type Browser, type Page, type BrowserContext } from 'playwright';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { BaseAdapter } from './base.js';
 import type { AdapterName, ScrapeOptions, ScrapeResult, SearchOptions, SearchResult } from '../types/adapters.js';
 import { toSingularType } from '../types/adapters.js';
 import { loadConfig } from '../types/config.js';
 import { FacebookParser } from '../parsers/facebook-parser.js';
+import { withRetry } from '../utils/retry.js';
+import { facebookRateLimiter } from '../utils/rate-limiter.js';
+import { scrapeCache, searchCache, Cache } from '../utils/cache.js';
 
 export class StandaloneAdapter extends BaseAdapter {
   name: AdapterName = 'standalone';
@@ -16,20 +20,24 @@ export class StandaloneAdapter extends BaseAdapter {
   private browser: Browser | null = null;
 
   async isAvailable(): Promise<boolean> {
-    // Always available
+    // Always available as fallback
     return true;
   }
 
   private async getBrowser(): Promise<Browser> {
     if (!this.browser) {
       const config = loadConfig();
+      console.error('[Standalone] Launching browser...');
+      
       this.browser = await chromium.launch({
         headless: config.headless,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-blink-features=AutomationControlled'
+          '--disable-blink-features=AutomationControlled',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process'
         ]
       });
     }
@@ -46,7 +54,14 @@ export class StandaloneAdapter extends BaseAdapter {
       locale: 'en-US',
       timezoneId: 'America/New_York',
       permissions: [],
-      javaScriptEnabled: true
+      javaScriptEnabled: true,
+      ignoreHTTPSErrors: true,
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'DNT': '1',
+        'Upgrade-Insecure-Requests': '1'
+      }
     });
 
     // Add stealth scripts
@@ -69,43 +84,23 @@ export class StandaloneAdapter extends BaseAdapter {
       // Hide automation
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (globalThis as any).chrome = { runtime: {} };
+
+      // Override permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters: any) => (
+        parameters.name === 'notifications' ?
+          Promise.resolve({ state: 'denied', onchange: null } as PermissionStatus) :
+          originalQuery(parameters)
+      );
     });
 
     return context;
   }
 
-  private async bypassLoginModal(page: Page): Promise<void> {
-    try {
-      // Wait a bit for modal to appear
-      await page.waitForTimeout(2000);
-
-      // Try pressing Escape
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(500);
-
-      // Try clicking outside modal
-      await page.mouse.click(10, 10);
-      await page.waitForTimeout(500);
-
-      // Try closing any visible close buttons
-      const closeButtons = await page.$$('[aria-label="Close"], [data-testid="close"]');
-      for (const btn of closeButtons) {
-        try {
-          await btn.click();
-          await page.waitForTimeout(300);
-        } catch {
-          // Ignore click errors
-        }
-      }
-    } catch {
-      // Ignore errors - modal might not exist
-    }
-  }
-
   private buildFacebookUrl(url: string): string {
     const config = loadConfig();
     
-    // Convert to mbasic if enabled (less anti-bot)
+    // Convert to mbasic if enabled (less anti-bot protection)
     if (config.use_mbasic && url.includes('facebook.com') && !url.includes('mbasic.')) {
       return url.replace('www.facebook.com', 'mbasic.facebook.com')
                 .replace('facebook.com', 'mbasic.facebook.com')
@@ -115,13 +110,20 @@ export class StandaloneAdapter extends BaseAdapter {
     return url;
   }
 
-  async scrapeUrl(url: string, options?: ScrapeOptions): Promise<ScrapeResult> {
-    const startTime = Date.now();
-    let context: BrowserContext | null = null;
+  private async closeContext(context: BrowserContext | null): Promise<void> {
+    if (context) {
+      try {
+        await context.close();
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
 
+  private async scrapeWithContext(targetUrl: string, options?: ScrapeOptions): Promise<string> {
+    const context = await this.createStealthContext();
+    
     try {
-      const targetUrl = this.buildFacebookUrl(url);
-      context = await this.createStealthContext();
       const page = await context.newPage();
 
       // Navigate to page
@@ -130,8 +132,31 @@ export class StandaloneAdapter extends BaseAdapter {
         timeout: options?.timeout || 30000
       });
 
-      // Bypass login modal
-      await this.bypassLoginModal(page);
+      // Wait for content
+      await page.waitForTimeout(2000);
+
+      // Try pressing Escape to dismiss modals
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(500);
+
+      // Click outside to dismiss any overlays
+      await page.mouse.click(10, 10);
+      await page.waitForTimeout(500);
+
+      // Try to find and click close buttons
+      try {
+        const closeButtons = await page.$$('[aria-label="Close"], [data-testid="close"], [role="button"][aria-label*="close" i]');
+        for (const btn of closeButtons) {
+          try {
+            await btn.click({ timeout: 500 });
+            await page.waitForTimeout(300);
+          } catch {
+            // Ignore click errors
+          }
+        }
+      } catch {
+        // Ignore
+      }
 
       // Random delay to seem human
       await this.randomDelay();
@@ -143,7 +168,62 @@ export class StandaloneAdapter extends BaseAdapter {
       await page.waitForTimeout(1000);
 
       // Get HTML content
-      const html = await page.content();
+      return await page.content();
+    } finally {
+      await this.closeContext(context);
+    }
+  }
+
+  private async searchWithContext(searchUrl: string, options?: SearchOptions): Promise<string> {
+    const context = await this.createStealthContext();
+    
+    try {
+      const page = await context.newPage();
+
+      await page.goto(searchUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: options?.timeout || 30000
+      });
+
+      await page.waitForTimeout(2000);
+      await page.keyboard.press('Escape');
+      await this.randomDelay();
+
+      return await page.content();
+    } finally {
+      await this.closeContext(context);
+    }
+  }
+
+  async scrapeUrl(url: string, options?: ScrapeOptions): Promise<ScrapeResult> {
+    const startTime = Date.now();
+
+    // Check cache first
+    const cacheKey = Cache.generateKey(url, options);
+    const cached = scrapeCache.get(cacheKey);
+    if (cached) {
+      console.error('[Standalone] Using cached result');
+      return cached as ScrapeResult;
+    }
+
+    try {
+      // Rate limiting
+      await facebookRateLimiter.acquire();
+
+      const targetUrl = this.buildFacebookUrl(url);
+      console.error(`[Standalone] Scraping: ${targetUrl}`);
+
+      // Use retry wrapper for the entire scrape operation
+      const html = await withRetry(
+        () => this.scrapeWithContext(targetUrl, options),
+        {
+          maxRetries: 2,
+          baseDelayMs: 3000,
+          onRetry: (attempt, error) => {
+            console.error(`[Standalone] Retry ${attempt}: ${error.message}`);
+          }
+        }
+      );
 
       // Parse posts
       const posts = this.parser.parsePosts(html);
@@ -151,7 +231,7 @@ export class StandaloneAdapter extends BaseAdapter {
       // Apply limit
       const limitedPosts = posts.slice(0, options?.limit || 20);
 
-      return {
+      const result: ScrapeResult = {
         success: true,
         data: limitedPosts,
         adapter_used: this.name,
@@ -161,39 +241,48 @@ export class StandaloneAdapter extends BaseAdapter {
           timestamp: new Date().toISOString()
         }
       };
+
+      // Cache successful result
+      scrapeCache.set(cacheKey, result);
+
+      return result;
     } catch (error) {
+      console.error(`[Standalone] Error: ${error}`);
       return this.createErrorResult(error);
-    } finally {
-      if (context) {
-        await context.close();
-      }
     }
   }
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult> {
     const startTime = Date.now();
     const searchType = options?.type || 'posts';
-    let context: BrowserContext | null = null;
+
+    // Check cache
+    const cacheKey = Cache.generateKey(`search:${query}`, options);
+    const cached = searchCache.get(cacheKey);
+    if (cached) {
+      console.error('[Standalone] Using cached search result');
+      return cached as SearchResult;
+    }
 
     try {
-      context = await this.createStealthContext();
-      const page = await context.newPage();
+      // Rate limiting
+      await facebookRateLimiter.acquire();
 
-      // Build search URL
+      // Build search URL (use mbasic for better success rate)
       const searchUrl = `https://mbasic.facebook.com/search/${searchType}/?q=${encodeURIComponent(query)}`;
+      console.error(`[Standalone] Searching: ${searchUrl}`);
 
-      await page.goto(searchUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: options?.timeout || 30000
-      });
+      const html = await withRetry(
+        () => this.searchWithContext(searchUrl, options),
+        {
+          maxRetries: 2,
+          baseDelayMs: 3000
+        }
+      );
 
-      await this.bypassLoginModal(page);
-      await this.randomDelay();
-
-      const html = await page.content();
       const items = this.parser.parsePosts(html);
 
-      return {
+      const result: SearchResult = {
         success: true,
         data: {
           type: toSingularType(searchType),
@@ -208,17 +297,20 @@ export class StandaloneAdapter extends BaseAdapter {
           timestamp: new Date().toISOString()
         }
       };
+
+      // Cache result
+      searchCache.set(cacheKey, result);
+
+      return result;
     } catch (error) {
+      console.error(`[Standalone] Search error: ${error}`);
       return this.createSearchErrorResult(error);
-    } finally {
-      if (context) {
-        await context.close();
-      }
     }
   }
 
   async cleanup(): Promise<void> {
     if (this.browser) {
+      console.error('[Standalone] Closing browser...');
       await this.browser.close();
       this.browser = null;
     }
