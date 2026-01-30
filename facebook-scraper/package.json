@@ -4,6 +4,9 @@
   "description": "Hybrid MCP Server for Facebook scraping - Auto-detects and uses available MCPs",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "facebook-scraper-mcp": "./dist/index.js"
+  },
   "scripts": {
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
