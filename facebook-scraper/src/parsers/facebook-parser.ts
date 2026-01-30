@@ -65,7 +65,8 @@ export class FacebookParser {
     return posts.slice(0, 50); // Limit to 50 posts
   }
 
-  private parsePostElement($: cheerio.CheerioAPI, element: cheerio.Cheerio<cheerio.Element>): FacebookPost | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private parsePostElement($: cheerio.CheerioAPI, element: any): FacebookPost | null {
     // Try to extract post ID
     const dataFt = element.attr('data-ft');
     let postId = `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;

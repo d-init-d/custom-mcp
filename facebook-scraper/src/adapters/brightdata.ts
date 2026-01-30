@@ -5,6 +5,7 @@
 
 import { BaseAdapter } from './base.js';
 import type { AdapterName, ScrapeOptions, ScrapeResult, SearchOptions, SearchResult } from '../types/adapters.js';
+import { toSingularType } from '../types/adapters.js';
 import { loadConfig } from '../types/config.js';
 import { FacebookParser } from '../parsers/facebook-parser.js';
 
@@ -98,7 +99,7 @@ export class BrightDataAdapter extends BaseAdapter {
       return {
         success: true,
         data: {
-          type: searchType,
+          type: toSingularType(searchType),
           items: items.slice(0, options?.limit || 10),
           total_count: items.length,
           has_more: items.length > (options?.limit || 10)

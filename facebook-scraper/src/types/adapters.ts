@@ -23,7 +23,20 @@ export interface ScrapeOptions {
 export interface SearchOptions {
   type: 'posts' | 'pages' | 'groups' | 'events' | 'marketplace';
   limit?: number;
+  timeout?: number;
   strategy?: AdapterName | 'auto';
+}
+
+// Helper to convert plural search type to singular for FacebookSearchResult
+export function toSingularType(type: SearchOptions['type']): 'post' | 'page' | 'group' | 'event' | 'marketplace' {
+  const map: Record<SearchOptions['type'], 'post' | 'page' | 'group' | 'event' | 'marketplace'> = {
+    'posts': 'post',
+    'pages': 'page',
+    'groups': 'group',
+    'events': 'event',
+    'marketplace': 'marketplace'
+  };
+  return map[type];
 }
 
 export interface ScrapeResult {

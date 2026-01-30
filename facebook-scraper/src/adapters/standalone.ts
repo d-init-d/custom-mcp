@@ -6,6 +6,7 @@
 import { chromium, type Browser, type Page, type BrowserContext } from 'playwright';
 import { BaseAdapter } from './base.js';
 import type { AdapterName, ScrapeOptions, ScrapeResult, SearchOptions, SearchResult } from '../types/adapters.js';
+import { toSingularType } from '../types/adapters.js';
 import { loadConfig } from '../types/config.js';
 import { FacebookParser } from '../parsers/facebook-parser.js';
 
@@ -66,7 +67,8 @@ export class StandaloneAdapter extends BaseAdapter {
       });
 
       // Hide automation
-      (window as unknown as { chrome?: object }).chrome = { runtime: {} };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).chrome = { runtime: {} };
     });
 
     return context;
@@ -136,7 +138,7 @@ export class StandaloneAdapter extends BaseAdapter {
 
       // Scroll to load more content
       await page.evaluate(() => {
-        window.scrollBy(0, 500);
+        scrollBy(0, 500);
       });
       await page.waitForTimeout(1000);
 
@@ -194,7 +196,7 @@ export class StandaloneAdapter extends BaseAdapter {
       return {
         success: true,
         data: {
-          type: searchType,
+          type: toSingularType(searchType),
           items: items.slice(0, options?.limit || 10),
           total_count: items.length,
           has_more: items.length > (options?.limit || 10)
